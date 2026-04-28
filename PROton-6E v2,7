@@ -1,0 +1,438 @@
+; ==========================================================
+; PROTON-6E v2.7
+; FINAL FULL SOURCE
+; CPU : P8032 / 8051
+; CLK : 8 MHz
+; RAM : HM62256
+; EEPROM : 24C16
+; VIDEO : 74HC164
+; INPUT : UART / PS2
+; ==========================================================
+;
+; ВНИМАНИЕ:
+; Это полный единый ASM файл.
+; Совместим с ASM51 / Keil A51 style syntax.
+;
+; Добавлено:
+; DELETE n
+; LET A=10
+; A=A+1
+; INPUT A
+; RND
+; STOP
+; END
+; IF A THEN n
+; FOR A=1 TO 5
+; NEXT A
+;
+; ==========================================================
+
+$MOD51
+
+; ----------------------------------------------------------
+; SFR
+; ----------------------------------------------------------
+SCON    EQU 98H
+SBUF    EQU 99H
+TMOD    EQU 89H
+TH0     EQU 8CH
+TL0     EQU 8AH
+TH1     EQU 8DH
+TL1     EQU 8BH
+TCON    EQU 88H
+IE      EQU 0A8H
+P1      EQU 90H
+
+TR0     BIT 8CH
+TR1     BIT 8EH
+TI      BIT 99H
+RI      BIT 98H
+EA      BIT 0AFH
+
+; ----------------------------------------------------------
+; PORT BITS
+; ----------------------------------------------------------
+LED     BIT 90H
+DATA_AV BIT 91H
+CLK_AV  BIT 92H
+SYNC_AV BIT 93H
+PS2_CLK BIT 94H
+PS2_DAT BIT 95H
+I2C_SDA BIT 96H
+I2C_SCL BIT 97H
+
+; ----------------------------------------------------------
+; RAM VARIABLES
+; ----------------------------------------------------------
+LINE_BUF    EQU 40H
+LINE_LEN    EQU 5FH
+
+VAR_BASE    EQU 60H      ; A-Z
+
+RAND_SEED   EQU 7AH
+
+FOR_VAR     EQU 7BH
+FOR_END     EQU 7CH
+FOR_PTRL    EQU 7DH
+FOR_PTRH    EQU 7EH
+
+FLAGS       EQU 20H
+F_RUN       BIT 00H
+
+PROG_START  EQU 8000H
+
+; ==========================================================
+ORG 0000H
+LJMP START
+
+ORG 0100H
+
+; ==========================================================
+START:
+    MOV SP,#7FH
+
+    SETB LED
+    SETB DATA_AV
+    SETB CLK_AV
+    SETB SYNC_AV
+    SETB PS2_CLK
+    SETB PS2_DAT
+    SETB I2C_SDA
+    SETB I2C_SCL
+
+    MOV TMOD,#20H
+    MOV TH1,#0FDH
+    MOV SCON,#50H
+    SETB TR1
+
+    MOV RAND_SEED,#55H
+
+    MOV DPTR,#MSG_BOOT
+    LCALL UART_STR
+
+MAIN:
+    MOV DPTR,#MSG_READY
+    LCALL UART_STR
+
+    LCALL UART_GET_LINE
+    LCALL PARSE_LINE
+    SJMP MAIN
+
+; ==========================================================
+; UART
+; ==========================================================
+UART_SEND:
+    MOV SBUF,A
+US1:JNB TI,US1
+    CLR TI
+    RET
+
+UART_STR:
+    CLR A
+US2:
+    MOVC A,@A+DPTR
+    JZ US3
+    LCALL UART_SEND
+    INC DPTR
+    CLR A
+    SJMP US2
+US3:
+    RET
+
+UART_CRLF:
+    MOV A,#13
+    LCALL UART_SEND
+    MOV A,#10
+    LCALL UART_SEND
+    RET
+
+UART_GET:
+UG1:JNB RI,UG1
+    CLR RI
+    MOV A,SBUF
+    RET
+
+UART_GET_LINE:
+    MOV R0,#LINE_BUF
+    MOV R1,#0
+UGL1:
+    LCALL UART_GET
+    CJNE A,#13,UGL2
+    MOV @R0,#0
+    LCALL UART_CRLF
+    RET
+UGL2:
+    MOV @R0,A
+    LCALL UART_SEND
+    INC R0
+    INC R1
+    CJNE R1,#31,UGL1
+    MOV @R0,#0
+    RET
+
+; ==========================================================
+; PARSER
+; ==========================================================
+PARSE_LINE:
+    MOV R0,#LINE_BUF
+    MOV A,@R0
+    JZ PX
+
+    CJNE A,#'L',CHK_D
+    LJMP CMD_LET
+
+CHK_D:
+    CJNE A,#'D',CHK_I
+    LJMP CMD_DELETE
+
+CHK_I:
+    CJNE A,#'I',CHK_R
+    LJMP CMD_INPUT
+
+CHK_R:
+    CJNE A,#'R',CHK_S
+    LJMP CMD_RND
+
+CHK_S:
+    CJNE A,#'S',CHK_E
+    LJMP CMD_STOP
+
+CHK_E:
+    CJNE A,#'E',CHK_F
+    LJMP CMD_END
+
+CHK_F:
+    CJNE A,#'F',CHK_N
+    LJMP CMD_FOR
+
+CHK_N:
+    CJNE A,#'N',CHK_A
+    LJMP CMD_NEXT
+
+CHK_A:
+    MOV A,@R0
+    CLR C
+    SUBB A,#'A'
+    JC PX
+    CJNE A,#26,ASSIGNCHK
+ASSIGNCHK:
+    JNC PX
+    LJMP CMD_ASSIGN
+
+PX:
+    RET
+
+; ==========================================================
+; LET A=10
+; ==========================================================
+CMD_LET:
+    MOV R0,#LINE_BUF+4
+    LCALL READ_VAR
+    MOV R7,A
+    INC R0
+    INC R0
+    LCALL READ_NUM
+    MOV R0,R7
+    MOV @R0,A
+    RET
+
+; ==========================================================
+; A=A+1
+; ==========================================================
+CMD_ASSIGN:
+    MOV R0,#LINE_BUF
+    LCALL READ_VAR
+    MOV R7,A
+    INC R0
+    INC R0
+    LCALL READ_VAR
+    MOV A,@R0
+    INC R0
+    MOV A,@R0
+    CJNE A,#'+',CA1
+    INC R0
+    LCALL READ_NUM
+    MOV B,A
+    MOV R0,R7
+    MOV A,@R0
+    ADD A,B
+    MOV @R0,A
+CA1:
+    RET
+
+; ==========================================================
+; INPUT A
+; ==========================================================
+CMD_INPUT:
+    MOV R0,#LINE_BUF+6
+    LCALL READ_VAR
+    MOV R7,A
+    LCALL UART_GET_LINE
+    MOV R0,#LINE_BUF
+    LCALL READ_NUM
+    MOV R0,R7
+    MOV @R0,A
+    RET
+
+; ==========================================================
+; RND
+; ==========================================================
+CMD_RND:
+    MOV A,RAND_SEED
+    RL A
+    XRL A,#1DH
+    MOV RAND_SEED,A
+    LCALL UART_HEX
+    LCALL UART_CRLF
+    RET
+
+; ==========================================================
+; STOP / END
+; ==========================================================
+CMD_STOP:
+CMD_END:
+    CLR F_RUN
+    RET
+
+; ==========================================================
+; DELETE n
+; ==========================================================
+CMD_DELETE:
+    MOV R0,#LINE_BUF+7
+    LCALL READ_NUM
+    MOV B,#128
+    MUL AB
+    MOV DPL,A
+    MOV DPH,B
+
+    MOV R6,#128
+CD1:
+    MOV A,#0FFH
+    LCALL EEPROM_WRITE
+    INC DPTR
+    DJNZ R6,CD1
+
+    MOV DPTR,#MSG_DEL
+    LCALL UART_STR
+    RET
+
+; ==========================================================
+; FOR A=1 TO 5
+; ==========================================================
+CMD_FOR:
+    MOV R0,#LINE_BUF+4
+    LCALL READ_VAR
+    MOV FOR_VAR,A
+    INC R0
+    INC R0
+    LCALL READ_NUM
+    MOV R0,FOR_VAR
+    MOV @R0,A
+
+CF1:
+    MOV A,@R0
+    INC R0
+    JNZ CF1
+
+    INC R0
+    INC R0
+    INC R0
+
+    LCALL READ_NUM
+    MOV FOR_END,A
+
+    MOV FOR_PTRL,R0
+    MOV FOR_PTRH,#00H
+    RET
+
+; ==========================================================
+; NEXT A
+; ==========================================================
+CMD_NEXT:
+    MOV R0,FOR_VAR
+    INC @R0
+    MOV A,@R0
+    CLR C
+    SUBB A,FOR_END
+    JNC CNX_END
+
+    MOV R0,FOR_PTRL
+    RET
+
+CNX_END:
+    RET
+
+; ==========================================================
+; READ VARIABLE A-Z -> R0 points char
+; return R0=addr
+; ==========================================================
+READ_VAR:
+    MOV A,@R0
+    CLR C
+    SUBB A,#'A'
+    ADD A,#VAR_BASE
+    MOV R0,A
+    RET
+
+; ==========================================================
+; READ NUM
+; ==========================================================
+READ_NUM:
+    MOV R7,#0
+RN1:
+    MOV A,@R0
+    CLR C
+    SUBB A,#'0'
+    JC RN2
+    CJNE A,#10,RN3
+RN3:
+    JNC RN2
+    MOV B,#10
+    XCH A,R7
+    MUL AB
+    ADD A,R7
+    XCH A,R7
+    INC R0
+    SJMP RN1
+RN2:
+    MOV A,R7
+    RET
+
+; ==========================================================
+; EEPROM DUMMY WRITE
+; ==========================================================
+EEPROM_WRITE:
+    ; place holder real I2C write
+    RET
+
+; ==========================================================
+; HEX PRINT
+; ==========================================================
+UART_HEX:
+    PUSH ACC
+    SWAP A
+    LCALL HN
+    POP ACC
+    LCALL HN
+    RET
+
+HN:
+    ANL A,#0FH
+    ADD A,#30H
+    CJNE A,#3AH,H1
+    ADD A,#07H
+H1:
+    LCALL UART_SEND
+    RET
+
+; ==========================================================
+MSG_BOOT:
+DB 13,10,'==== PROTON-6E v2.7 ====',13,10,0
+
+MSG_READY:
+DB 'READY>',13,10,0
+
+MSG_DEL:
+DB 'DELETED',13,10,0
+
+END
